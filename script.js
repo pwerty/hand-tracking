@@ -24,28 +24,6 @@ const HAND_LANDMARKS = {
     PINKY_MCP: 17, PINKY_PIP: 18, PINKY_DIP: 19, PINKY_TIP: 20
 };
 
-// 20 bone mappings between MediaPipe landmarks and Blender bone names
-// [startIdx, endIdx] -> boneName
-// [0,1] -> thumb_cmc
-// [1,2] -> thumb_mcp
-// [2,3] -> thumb_ip
-// [3,4] -> thumb_tip
-// [0,5] -> index_mcp
-// [5,6] -> index_pip
-// [6,7] -> index_dip
-// [7,8] -> index_tip
-// [0,9] -> middle_mcp
-// [9,10] -> middle_pip
-// [10,11] -> middle_dip
-// [11,12] -> middle_tip
-// [0,13] -> ring_mcp
-// [13,14] -> ring_pip
-// [14,15] -> ring_dip
-// [15,16] -> ring_tip
-// [0,17] -> pinky_mcp
-// [17,18] -> pinky_pip
-// [18,19] -> pinky_dip
-// [19,20] -> pinky_tip
 const HAND_CONNECTIONS = [
     [0,1],[1,2],[2,3],[3,4],
     [0,5],[5,6],[6,7],[7,8],
@@ -97,7 +75,7 @@ function initThreeJS() {
 function loadGLBModel() {
     const loader = new GLTFLoader();
     
-    loader.load('./models/newHanda.glb', 
+    loader.load('./models/FullFlat.glb', 
         function(gltf) {
             model = gltf.scene;
             model.scale.set(0.1, 0.1, 0.1);
@@ -175,6 +153,8 @@ function extractBones(object) {
   });
 }
 
+
+
 // 기본 손 모델 생성 (GLB 로드 실패시)
 function createDefaultHandModel() {
     const handGroup = new THREE.Group();
@@ -195,72 +175,196 @@ function createDefaultHandModel() {
     scene.add(model);
 }
 
-// MediaPipe 랜드마크를 본 회전으로 변환
+// Swing & Twist 분리용 헬퍼
+function clampTwist(q, twistAxis, maxTwist) {
+    // twist 축 방향 성분 추출
+    const proj = twistAxis.clone().multiplyScalar(
+      twistAxis.dot(new THREE.Vector3(q.x, q.y, q.z))
+    );
+    let twistQuat = new THREE.Quaternion(proj.x, proj.y, proj.z, q.w).normalize();
+    // swing = q * inverse(twist)
+    const swingQuat = q.clone().multiply(twistQuat.clone().invert());
+    // twist 각도 계산 & 클램프
+    let angle = 2 * Math.acos(twistQuat.w);
+    if (angle > Math.PI) angle -= 2 * Math.PI;
+    angle = THREE.MathUtils.clamp(angle, -maxTwist, maxTwist);
+    twistQuat.setFromAxisAngle(twistAxis, angle);
+    // swing * twist 반환
+    return swingQuat.multiply(twistQuat);
+  }
+  
+  // World 변환 헬퍼
+  function lmToWorld(lm) {
+    const HAND_SCALE = 1.0;
+    return new THREE.Vector3(
+      ((lm.x * 2) - 1) * HAND_SCALE,
+      -((lm.y * 2) - 1) * HAND_SCALE,
+      -lm.z * 2 * HAND_SCALE
+    );
+  }
+  
+  // per-finger 연결 맵
+  const FINGER_CONNECTIONS = {
+    thumb:  [[0,1],[1,2],[2,3],[3,4]],
+    index:  [[0,5],[5,6],[6,7],[7,8]],
+    middle: [[0,9],[9,10],[10,11],[11,12]],
+    ring:   [[0,13],[13,14],[14,15],[15,16]],
+    pinky:  [[0,17],[17,18],[18,19],[19,20]],
+  };
+  
+
+// 개선된 applyHandLandmarksToModel
 function applyHandLandmarksToModel(landmarks) {
-    if (!landmarks || landmarks.length === 0 || !model) return;
-    
-    // 손목 위치 업데이트
-    const wrist = landmarks[HAND_LANDMARKS.WRIST];
-    if (wrist) {
-       const x = (wrist.x * 2) - 1;
-       const y = -((wrist.y * 2) - 1);
-        const z = -wrist.z * 2;
-        model.position.set(x, y, z);
-
-            // 2) Palm Normal 계산 (Flip 감지를 위해)
-        const I = landmarks[HAND_LANDMARKS.INDEX_MCP];
-        const P = landmarks[HAND_LANDMARKS.PINKY_MCP];
-        const w = new THREE.Vector3(x, y, z);
-        const i = new THREE.Vector3((I.x * 2) - 1, -((I.y * 2) - 1), -I.z * 2);
-        const p = new THREE.Vector3((P.x * 2) - 1, -((P.y * 2) - 1), -P.z * 2);
-        const palmNormal = new THREE.Vector3()
-      .subVectors(i, w)
-      .cross(new THREE.Vector3().subVectors(p, w))
-      .normalize();
-        
-        // 손목 회전 적용
-        // 반 강제로 손목 고정 적용
-        const wristRotation = calculateBoneRotation(new THREE.Vector3(x,y,z), palmNormal);
-        bones.wrist.rotation.copy(wristRotation);
+    if (!landmarks || !model) return;
+    const SMOOTHING = 0.2;
+    const MAX_TWIST = THREE.MathUtils.degToRad(30);
+  
+    // 1) 손목 위치 스무딩
+    const wristLM = landmarks[HAND_LANDMARKS.WRIST];
+    if (wristLM) {
+      const wPos = lmToWorld(wristLM);
+      model.position.lerp(wPos, SMOOTHING);
     }
-    
-//     // 각 손가락 본에 회전 적용
-//     applyFingerRotation('thumb', [
-//         landmarks[HAND_LANDMARKS.THUMB_CMC],
-//         landmarks[HAND_LANDMARKS.THUMB_MCP],
-//         landmarks[HAND_LANDMARKS.THUMB_IP],
-//         landmarks[HAND_LANDMARKS.THUMB_TIP]
-//     ]);
-    
-//     applyFingerRotation('index', [
-//         landmarks[HAND_LANDMARKS.INDEX_MCP],
-//         landmarks[HAND_LANDMARKS.INDEX_PIP],
-//         landmarks[HAND_LANDMARKS.INDEX_DIP],
-//         landmarks[HAND_LANDMARKS.INDEX_TIP]
-//     ]);
+  
+    // 2) palmNormal 계산 (4 MCP 순환 cross 합산)
+    const wPt = lmToWorld(landmarks[0]);
+    const mcpIdxs = [
+      HAND_LANDMARKS.INDEX_MCP,
+      HAND_LANDMARKS.MIDDLE_MCP,
+      HAND_LANDMARKS.RING_MCP,
+      HAND_LANDMARKS.PINKY_MCP
+    ];
+    let normalSum = new THREE.Vector3();
+    for (let i = 0; i < mcpIdxs.length; i++) {
+      const a = lmToWorld(landmarks[mcpIdxs[i]]);
+      const b = lmToWorld(landmarks[mcpIdxs[(i+1)%mcpIdxs.length]]);
+      normalSum.add(
+        new THREE.Vector3().subVectors(a, wPt)
+          .cross(new THREE.Vector3().subVectors(b, wPt))
+      );
+    }
+    const palmNormal = normalSum.normalize();
+    if (palmNormal.z < 0) palmNormal.negate();
+  
+    // 3) 손가락별 처리
+    for (const [finger, connections] of Object.entries(FINGER_CONNECTIONS)) {
+      // finger마다 자신만의 normal: MCP→PIP × MCP→DIP
+      // finger마다 자신만의 normal: MCP→PIP × MCP→DIP, thumb은 CMC→MCP × CMC→IP
+      let m, p, d;
+      if (finger === 'thumb') {
+          // Thumb uses CMC, MCP, IP
+          m = lmToWorld(landmarks[HAND_LANDMARKS.THUMB_CMC]);
+          p = lmToWorld(landmarks[HAND_LANDMARKS.THUMB_MCP]);
+          d = lmToWorld(landmarks[HAND_LANDMARKS.THUMB_IP]);
+      } else {
+          m = lmToWorld(landmarks[HAND_LANDMARKS[finger.toUpperCase() + '_MCP']]);
+          p = lmToWorld(landmarks[HAND_LANDMARKS[finger.toUpperCase() + '_PIP']]);
+          d = lmToWorld(landmarks[HAND_LANDMARKS[finger.toUpperCase() + '_DIP']]);
+      }
+      let fNormal = new THREE.Vector3()
+        .subVectors(p, m)
+        .cross(new THREE.Vector3().subVectors(d, m))
+        .normalize();
+      if (fNormal.dot(palmNormal) < 0) fNormal.negate();
+  
+      // 각 본(head→tail)마다 회전 적용
+      for (const [s,e] of connections) {
+        const lmA = landmarks[s], lmB = landmarks[e];
+        if (!lmA || !lmB) continue;
+        
+        const pA = lmToWorld(lmA);
+        const pB = lmToWorld(lmB);
+        const dir = pB.clone().sub(pA).normalize();
+  
+        const boneName = getBoneName(s, e);
+        const bone = bones[boneName];
+        if (!bone) continue;
+  
+        // ① bind-pose 축 추출
+        const head = new THREE.Vector3(), tail = new THREE.Vector3();
+        bone.getWorldPosition(head);
+        bone.children[0]?.getWorldPosition(tail) || tail.copy(head).add(dir);
+        //const boneAxis = new THREE.Vector3().subVectors(tail, head).normalize();
+  
 
-//     applyFingerRotation('middle', [
-//       landmarks[HAND_LANDMARKS.MIDDLE_MCP],
-//       landmarks[HAND_LANDMARKS.MIDDLE_PIP],
-//       landmarks[HAND_LANDMARKS.MIDDLE_DIP],
-//       landmarks[HAND_LANDMARKS.MIDDLE_TIP]
-//     ]);
+        // ① bind-pose 축 추출
+// const boneAxis = new THREE.Vector3().subVectors(tail, head).normalize();
+const boneAxis = new THREE.Vector3(0, 1, 0); // 또는 (0,0,1), (1,0,0) 등 실험
 
-//     applyFingerRotation('ring', [
-//      landmarks[HAND_LANDMARKS.RING_MCP],
-//      landmarks[HAND_LANDMARKS.RING_PIP],
-//      landmarks[HAND_LANDMARKS.RING_DIP],
-//      landmarks[HAND_LANDMARKS.RING_TIP]
-//     ]);
+// ② raw 회전(quaternion)
+const rot1 = new THREE.Quaternion().setFromUnitVectors(boneAxis, dir);
 
-//    applyFingerRotation('pinky', [
-//     landmarks[HAND_LANDMARKS.PINKY_MCP],
-//     landmarks[HAND_LANDMARKS.PINKY_PIP],
-//     landmarks[HAND_LANDMARKS.PINKY_DIP],
-//     landmarks[HAND_LANDMARKS.PINKY_TIP]
-//     ]);
+// twist 보정 없이 바로 적용
+bone.quaternion.slerp(rot1, SMOOTHING);
+        // ② raw 회전(quaternion)
+       // const rot1 = new THREE.Quaternion().setFromUnitVectors(boneAxis, dir);
+        // ③ twist 보정
+       // const bindUp = new THREE.Vector3(0,1,0).applyQuaternion(rot1);
+        //const bindUp = new THREE.Vector3(0,1,0).applyQuaternion(rot1);
+       // const bindUp = new THREE.Vector3(0,0,0).applyQuaternion(rot1);
+      //  const rot2 = new THREE.Quaternion().setFromUnitVectors(bindUp, fNormal);
+       // const rawQuat = rot2.multiply(rot1);
+  
+        // ④ twist 클램프 + 스무딩
+      //  const safeQuat = clampTwist(rawQuat, boneAxis, MAX_TWIST);
+        //bone.quaternion.slerp(rot1, SMOOTHING);
+      }
+    }
+  }
+
+// // MediaPipe 랜드마크를 본 회전으로 변환
+// function applyHandLandmarksToModel(landmarks)
+// {
+//     if (!landmarks || landmarks.length === 0 || !model) return;
+//     // smoothing factor: 0 = no smoothing, 1 = freeze
+//     const SMOOTHING = 0.5;
+
+//     // 1) Update hand root (optional, keep model at wrist)
+//     const wristLM = landmarks[HAND_LANDMARKS.WRIST];
+//     if (wristLM) {
+//       const wristPos = landmarkToWorld(wristLM);
+//       model.position.lerp(wristPos, SMOOTHING);
+//     }
+
+//     // 2) Compute palm normal using four MCP landmarks
+//     const wristPt = landmarkToWorld(landmarks[HAND_LANDMARKS.WRIST]);
+//     const mcpIndices = [
+//       HAND_LANDMARKS.INDEX_MCP,
+//       HAND_LANDMARKS.MIDDLE_MCP,
+//       HAND_LANDMARKS.RING_MCP,
+//       HAND_LANDMARKS.PINKY_MCP
+//     ];
+//     let normalSum = new THREE.Vector3();
+//     for (let i = 0; i < mcpIndices.length; i++) {
+//       const a = landmarkToWorld(landmarks[mcpIndices[i]]);
+//       const b = landmarkToWorld(landmarks[mcpIndices[(i + 1) % mcpIndices.length]]);
+//       normalSum.add(new THREE.Vector3().subVectors(a, wristPt)
+//         .cross(new THREE.Vector3().subVectors(b, wristPt)));
+//     }
+//     const palmNormal = normalSum.normalize();
+//     if (palmNormal.z < 0) palmNormal.negate();
+
+//       // 3) Loop through all bone connections
+//     for (const [startIdx, endIdx] of HAND_CONNECTIONS) {
+//         const aLM = landmarks[startIdx], bLM = landmarks[endIdx];
+//         if (!aLM || !bLM) continue;
+
+//     const pA = landmarkToWorld(aLM);
+//     const pB = landmarkToWorld(bLM);
+//     const dir = pB.clone().sub(pA).normalize();
+//     const boneName = getBoneName(startIdx, endIdx);
+//     const bone = bones[boneName];
+//     if (!bone) continue;
+
+//     // optionally snap head position
+//    // bone.position.copy(pA);
+//     // apply quaternion rotation
+//     const quat = calculateBoneQuaternion(dir, palmNormal, bone);
+//     bone.quaternion.copy(quat);
     
-}
+// }
+// }
+
 
 // 손가락 회전 계산 및 적용
 function applyFingerRotation(fingerName, joints) {
@@ -287,7 +391,7 @@ function applyFingerRotation(fingerName, joints) {
         const direction = v2.clone().sub(v1).normalize();
           
           // 회전 계산
-          const rotation = calculateBoneRotation(direction);
+         // const rotation = calculateBoneRotation(direction);
           
           // 정확한 본 이름을 매핑
           let boneName = '';
@@ -333,37 +437,41 @@ function applyFingerRotation(fingerName, joints) {
       }
   }
 }
-// 본 회전 계산 함수
-function calculateBoneRotation(direction, palmNormal) {
-    // const rotation = new THREE.Euler();
-    
-    // // 방향 벡터를 기반으로 회전 각도 계산
-    // rotation.x = Math.atan2(direction.y, direction.z);
-    // rotation.y = Math.atan2(direction.x, direction.z);
-    // rotation.z = Math.atan2(direction.x, direction.y);
-    
-    // return rotation;
-    
-  // direction: bone이 향해야 할 forward 벡터
-  // palmNormal: 손바닥이 향하는 법선 벡터
 
-  const F = direction.clone().normalize();                      // 뼈 길이 축
-  const R = new THREE.Vector3().crossVectors(palmNormal, F).normalize();  // right 축
-  const U = new THREE.Vector3().crossVectors(F, R).normalize();          // up 축
+/**
+ * direction   : bone이 향해야 할 forward 벡터 (Three.js world space)
+ * palmNormal  : 손바닥 평면의 법선 벡터 (Three.js world space)
+ * bone        : Three.Bone 객체 (bind pose 기준으로 계산)
+ * 반환        : bone에 바로 적용할 수 있는 Quaternion
+ */
+function calculateBoneQuaternion(direction, palmNormal, bone) {
+    // 1) bone bind‐pose forward axis 추출
+    const headPos = new THREE.Vector3();
+    const tailPos = new THREE.Vector3();
+    bone.getWorldPosition(headPos);
+    if (bone.children.length && bone.children[0].isBone) {
+      bone.children[0].getWorldPosition(tailPos);
+    } else {
+      tailPos.copy(headPos).add(direction);
+    }
+    const boneAxis = tailPos.clone().sub(headPos).normalize();
+  
+    // 2) boneAxis → target forward direction 회전 quaternion
+    const targetDir = direction.clone().normalize();
+    const rotToDir = new THREE.Quaternion().setFromUnitVectors(boneAxis, targetDir);
+  
+    // 3) twist 보정: 회전된 Up벡터 → palmNormal
+    //    Up벡터 기준은 world Y(0,1,0) 또는 bind‐pose Up축(필요시 커스터마이즈)
+    const bindUp = new THREE.Vector3(0, 1, 0).applyQuaternion(rotToDir);
+    const twistQuat = new THREE.Quaternion().setFromUnitVectors(
+      bindUp, 
+      palmNormal.clone().normalize()
+    );
+  
+    // 4) 두 회전 결합
+    return twistQuat.multiply(rotToDir);
+  }
 
-  // 세 축으로 Basis 행렬 생성
-  const basisMat = new THREE.Matrix4().makeBasis(R, F, U);
-  // 회전 행렬 → Euler
-  return new THREE.Euler().setFromRotationMatrix(basisMat, 'XYZ');
-
-    // Default bone forward axis is +Y in Blender
-    const boneAxis = new THREE.Vector3(0, 0.5, 0);
-    // Compute quaternion rotating boneAxis to the target direction
-    const quaternion = new THREE.Quaternion().setFromUnitVectors(boneAxis, direction.clone().normalize());
-    // Convert quaternion to Euler angles (matching the bone’s rotation order)
-    const euler = new THREE.Euler().setFromQuaternion(quaternion, 'XYZ');
-    return euler;
-}
 
 // 메인 예측 루프 수정
 async function predictWebcam() {
@@ -376,6 +484,7 @@ async function predictWebcam() {
     
     if (results.landmarks && results.landmarks.length > 0) {
         for (const landmarks of results.landmarks) {
+            // 빨간 점과 초록 선으로 이루어진 가상 선을 그립니다. 
             drawHand(landmarks);
             // 스켈레톤 애니메이션 적용
             applyHandLandmarksToModel(landmarks);
@@ -433,7 +542,7 @@ function drawHand(landmarks) {
         [0,5], [5,6], [6,7], [7,8],
         [5,9], [9,10], [10,11], [11,12],
         [9,13], [13,14], [14,15], [15,16],
-        [13,17], [17,18], [18,19], [19,20], [0,17]
+        [0,17], [13,17], [17,18], [18,19], [19,20]
     ];
     
     ctx.strokeStyle = '#00FF00';
